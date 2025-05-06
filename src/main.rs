@@ -1,18 +1,24 @@
+use axum::extract::Query;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use axum::Router;
+use axum::{Json, Router};
 use axum::{
     extract::Multipart,
-    routing::post,
+    routing::{post,get},
 };
 
 use image::ImageFormat;
 use image::ImageReader;
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
 use std::io::Cursor;
+use exif::{Tag, In};
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new().route("/blur",post(handler_blur));
+    let app = Router::new().route("/jpeg",get(jpeg_orientation))
+                                .route("/img", get(handler));
+
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -54,4 +60,86 @@ async fn handler_blur(mut multipart: Multipart) -> impl IntoResponse {
         "No image is provided".into()
     )
 
+}
+
+
+#[derive(Debug, Deserialize)]
+struct Params {
+    path : String
+}
+
+#[derive(Serialize)]
+struct ResponseOrientarion {
+    orientation: Option<u8>,
+    msg: String
+}
+
+async fn jpeg_orientation(Query(params) : Query<Params>) -> impl IntoResponse {
+
+
+    println!("path from params: {}", params.path);
+    let file = match File::open(&params.path) {
+        Ok(file) => file,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ResponseOrientarion {
+                    orientation: None,
+                    msg: "Could not open the image , please provide the correct path : error {e}".to_owned()
+                })
+            );
+        }
+    };
+
+    println!("0");
+
+    // let file = std::fs::File::open()?;
+    let mut bufreader = std::io::BufReader::new(&file);
+    let exifreader = exif::Reader::new();
+    let exif = exifreader.read_from_container(&mut bufreader).unwrap();
+
+    println!("1");
+
+    if let Some(field) = exif.get_field(Tag::Orientation, In::PRIMARY)
+                                    .and_then(|f| f.value.get_uint(0)) {
+        (
+            StatusCode::OK,
+                Json(ResponseOrientarion {
+                    orientation: Some(field as u8),
+                    msg: "orientation tag found".to_string()
+                })
+
+        )
+    }
+    else{
+        (
+            StatusCode::BAD_REQUEST,
+                Json(ResponseOrientarion {
+                    orientation: None,
+                    msg: "failed".to_string()
+                })
+        )
+    }
+    
+}
+
+
+async fn handler(Query(params) : Query<Params>) -> impl IntoResponse { 
+
+    match fs::read(&params.path) {
+        Ok(bytes) => {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "image/jpeg")],
+                bytes
+            )
+        },
+        Err(e) => {
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "fILE not found".into()
+            )
+        }
+    }
 }
